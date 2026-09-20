@@ -24,6 +24,10 @@ export function blankBoxMon() {
     ivs: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 },
     nature: '',
     ability: '',
+    level: null,   // in-game level (captured from the summary header)
+    item: '',      // held item name
+    nickname: '',  // '' when not nicknamed
+    moves: ['', '', '', ''],
     shiny: false,
     alpha: false,
     source: 'manual', // 'manual' | 'capture' | 'import'
@@ -65,6 +69,10 @@ export function normalizeMon(m) {
     ivs,
     nature: typeof m.nature === 'string' ? m.nature : '',
     ability: typeof m.ability === 'string' ? m.ability : '',
+    level: Number.isInteger(m.level) && m.level >= 1 && m.level <= 100 ? m.level : null,
+    item: typeof m.item === 'string' ? m.item : '',
+    nickname: typeof m.nickname === 'string' ? m.nickname : '',
+    moves: [0, 1, 2, 3].map((i) => (Array.isArray(m.moves) && typeof m.moves[i] === 'string' ? m.moves[i] : '')),
     shiny: !!m.shiny,
     alpha: !!m.alpha,
     source: ['manual', 'capture', 'import'].includes(m.source) ? m.source : 'manual',
@@ -202,8 +210,39 @@ export function appendImportedBoxes(store, imported) {
   return { ...store, boxes: [...store.boxes, ...boxes], activeBoxId: boxes[0].id };
 }
 
-export function storeToJSON(store) {
-  return JSON.stringify(normalizeStore(store), null, 2);
+// `nameOf(id)` (optional) adds a readable `name` to each mon — ignored on import.
+export function storeToJSON(store, nameOf) {
+  const out = normalizeStore(store);
+  if (nameOf) {
+    out.boxes = out.boxes.map((b) => ({ ...b, mons: b.mons.map((m) => ({ id: m.id, name: nameOf(m.species), ...m })) }));
+  }
+  return JSON.stringify(out, null, 2);
+}
+
+// Plain-text Box summary for pasting into an AI chat — one line per mon.
+export function boxToAiText(store, nameOf) {
+  const g = { M: '♂', F: '♀', N: 'genderless', D: '' };
+  const lines = ['My PokéMMO Box (IVs are HP/Atk/Def/SpA/SpD/Spe, 0-31):'];
+  for (const b of normalizeStore(store).boxes) {
+    if (!b.mons.length) continue;
+    lines.push('', `${b.name}:`);
+    for (const m of b.mons) {
+      const name = nameOf(m.species) || 'Unknown';
+      const bits = [m.nickname ? `${m.nickname} (${name})` : name];
+      if (g[m.gender]) bits[0] += ` ${g[m.gender]}`;
+      if (m.level) bits.push(`Lv. ${m.level}`);
+      if (m.nature) bits.push(`${m.nature} nature`);
+      if (m.ability) bits.push(`ability ${m.ability}`);
+      bits.push(`held item: ${m.item || 'none'}`);
+      bits.push(`IVs ${IV_KEYS.map((k) => m.ivs[k]).join('/')}`);
+      const mv = m.moves.filter(Boolean);
+      if (mv.length) bits.push(`moves: ${mv.join(' / ')}`);
+      if (m.shiny) bits.push('shiny');
+      if (m.alpha) bits.push('alpha');
+      lines.push(`- ${bits.join(', ')}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 // Parse imported text → { store, error }. Accepts a v3 store or a legacy flat

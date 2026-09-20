@@ -12,6 +12,7 @@
     "core:event:default",
     "allow-list-windows",
     "allow-capture-and-ocr",
-    "allow-flash-toast"
+    "allow-flash-toast",
+    "allow-save-text"
   ]
 }

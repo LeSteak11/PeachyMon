@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import {
-  Sun, Moon, Plus, Trash2, Pencil, Check, X, Download, Upload, Search, Filter,
+  Sun, Moon, Plus, Trash2, Pencil, Check, X, Download, Upload, Search, Filter, ClipboardCopy, ArrowUpRight,
 } from 'lucide-react';
 import PokemonSprite from '../components/PokemonSprite.jsx';
 import PokemonPicker from '../components/PokemonPicker.jsx';
@@ -14,12 +14,14 @@ import {
   blankBoxMon, perfectCount, boxById, allMons,
   addBox, renameBox, deleteBox, setActiveBox,
   addMon, addMons, updateMon, removeMon, moveMon,
-  storeToJSON, storeFromJSON, appendImportedBoxes,
+  storeToJSON, storeFromJSON, appendImportedBoxes, boxToAiText,
 } from '../lib/box.js';
+import { showToast } from '../lib/toast.js';
+import { downloadText } from '../lib/desktop.js';
 
 const EMPTY_FILTERS = { search: '', types: [], gender: 'any', shiny: 'any', alpha: 'any', minPerfect: 0 };
 
-export default function BoxPage({ data, store, setStore, theme, onTheme }) {
+export default function BoxPage({ data, store, setStore, theme, onTheme, onCaught }) {
   const [viewBoxId, setViewBoxId] = useState(() => store.activeBoxId); // boxId | 'all'
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [showFilters, setShowFilters] = useState(false);
@@ -76,9 +78,18 @@ export default function BoxPage({ data, store, setStore, theme, onTheme }) {
     if (viewingAll) setViewBoxId(store.activeBoxId);
     setEditId(mon.id);
   };
-  const onCaptureImport = (mons) => setStore((s) => addMons(s, s.activeBoxId, mons));
+  // Captured mons are ones you own, so tick their species off in the Tracker.
+  const onCaptureImport = (mons) => {
+    setStore((s) => addMons(s, s.activeBoxId, mons));
+    for (const m of mons) if (m.species != null) onCaught?.(m.species);
+  };
 
-  const doExport = () => downloadText(storeToJSON(store), 'pokemmo-box.json');
+  const nameOf = (id) => byId.get(id)?.name || null;
+  const doExport = () => downloadText(storeToJSON(store, nameOf), 'pokemmo-box.json');
+  const doCopyAi = async () => {
+    try { await navigator.clipboard.writeText(boxToAiText(store, nameOf)); showToast('Box copied — paste it into your AI chat.'); }
+    catch { showToast('Could not copy to the clipboard.'); }
+  };
   const doImportFile = (file) => {
     if (!file) return;
     const reader = new FileReader();
@@ -103,6 +114,10 @@ export default function BoxPage({ data, store, setStore, theme, onTheme }) {
             className="inline-flex items-center gap-1 px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs">
             <Upload size={13} /> Import
           </button>
+          <button type="button" onClick={doCopyAi} disabled={totalCount === 0} title="Copy your Box as readable text to paste into an AI chat"
+            className="inline-flex items-center gap-1 px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs disabled:opacity-40">
+            <ClipboardCopy size={13} /> Copy for AI
+          </button>
           <button type="button" onClick={doExport} disabled={totalCount === 0} title="Download your whole Box as JSON"
             className="inline-flex items-center gap-1 px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs disabled:opacity-40">
             <Download size={13} /> Export
@@ -116,7 +131,7 @@ export default function BoxPage({ data, store, setStore, theme, onTheme }) {
         </div>
       </header>
 
-      <CapturePanel data={data} onImport={onCaptureImport} />
+      <CapturePanel data={data} onImport={onCaptureImport} onUpdate={(id, patch) => setStore((s) => updateMon(s, id, patch))} target={editMon} />
 
       {/* Box tabs */}
       <div className="mt-3 flex items-center gap-1 flex-wrap border-b border-[#e6dabf] dark:border-stone-800 pb-2">
@@ -214,6 +229,7 @@ export default function BoxPage({ data, store, setStore, theme, onTheme }) {
           onUpdate={(patch) => setStore((s) => updateMon(s, editMon.id, patch))}
           onMove={(toBox) => setStore((s) => moveMon(s, editMon.id, toBox))}
           onDelete={() => { setStore((s) => removeMon(s, editMon.id)); setEditId(null); }}
+          onCaught={onCaught}
         />
       )}
     </main>
@@ -285,7 +301,8 @@ function MonTile({ mon, sp, showBox, onClick }) {
             : <span className="text-stone-300 dark:text-stone-700 text-2xl">?</span>}
       </div>
       <div className="mt-0.5 w-full text-center">
-        <div className="text-[10px] truncate text-stone-700 dark:text-stone-300">{sp ? sp.name : 'Unknown'}</div>
+        <div className="text-[10px] truncate text-stone-700 dark:text-stone-300" title={mon.nickname || undefined}>{mon.nickname || (sp ? sp.name : 'Unknown')}</div>
+        {mon.level != null && <div className="text-[9px] text-stone-500 dark:text-stone-400">Lv. {mon.level}</div>}
         <div className="text-[9px] text-stone-500 dark:text-stone-400">{perfect > 0 ? `${perfect}×31` : '—'}</div>
         {showBox && <div className="text-[8px] text-stone-400 truncate">{showBox}</div>}
       </div>
@@ -295,11 +312,17 @@ function MonTile({ mon, sp, showBox, onClick }) {
 
 /* ── mon edit modal ── */
 
-function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete }) {
+function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete, onCaught }) {
   const breederPokemon = useMemo(() => data.pokemon, [data.pokemon]);
   const sp = mon.species != null ? data.pokemon.find((p) => p.id === mon.species) : null;
   const cat = sp ? (sp.id === 132 ? 'ditto' : genderRatioCategory(sp)) : null;
   const isMixed = cat === 'mixed';
+  const itemNames = useMemo(() => [...new Set(Object.values(data.items).map((i) => i.name).filter(Boolean))].sort(), [data.items]);
+  const moveNames = useMemo(() => [...new Set(Object.values(data.moves).map((m) => m.name).filter(Boolean))].sort(), [data.moves]);
+  // Next stage(s) this species can evolve into, named from the dex.
+  const evos = useMemo(() => (sp?.evolutions || [])
+    .map((e) => ({ id: e.id, name: data.pokemon.find((p) => p.id === e.id)?.name || e.name }))
+    .filter((e) => e.id != null && e.name), [sp, data.pokemon]);
 
   return (
     <Modal title="Edit mon" onClose={onClose} maxWidth="max-w-md">
@@ -312,6 +335,21 @@ function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete })
         <div>
           <label className="text-xs text-stone-500 dark:text-stone-400">Species</label>
           <PokemonPicker pokemon={breederPokemon} value={mon.species} onChange={(id) => onUpdate({ species: id })} placeholder="Pick species" />
+          {/* Evolved in-game? Keep the same mon (IVs, level, moves) and just
+              move it up its evolution line. */}
+          {evos.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] text-stone-500 dark:text-stone-400">Evolved in-game?</span>
+              {evos.map((e) => (
+                <button key={e.id} type="button"
+                  onClick={() => { onUpdate({ species: e.id }); onCaught?.(e.id); }}
+                  title={`Change this mon into ${e.name}, keeping its IVs, level and moves`}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs">
+                  <ArrowUpRight size={12} /> Evolve → {e.name}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         <div>
@@ -356,6 +394,53 @@ function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete })
           </label>
         </div>
 
+        <div className="flex flex-wrap items-end gap-3">
+          <div>
+            <label className="block text-xs text-stone-500 dark:text-stone-400">Level</label>
+            <input type="number" min={1} max={100} value={mon.level ?? ''} placeholder="—"
+              onChange={(e) => { const n = parseInt(e.target.value, 10); onUpdate({ level: n >= 1 && n <= 100 ? n : null }); }}
+              className="mt-0.5 px-2 py-1 rounded border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-sm w-20" />
+          </div>
+          <div>
+            <label className="block text-xs text-stone-500 dark:text-stone-400">Held item</label>
+            <input list="box-item-names" value={mon.item || ''} placeholder="None"
+              onChange={(e) => onUpdate({ item: e.target.value })}
+              className="mt-0.5 px-2 py-1 rounded border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-sm w-40" />
+            <datalist id="box-item-names">
+              {itemNames.map((n) => <option key={n} value={n} />)}
+            </datalist>
+          </div>
+          <div>
+            <label className="block text-xs text-stone-500 dark:text-stone-400">Nickname</label>
+            <input value={mon.nickname || ''} placeholder={sp ? sp.name : '—'}
+              onChange={(e) => onUpdate({ nickname: e.target.value })}
+              className="mt-0.5 px-2 py-1 rounded border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-sm w-36" />
+          </div>
+        </div>
+
+        <div>
+          <label className="block text-xs text-stone-500 dark:text-stone-400">Moves</label>
+          <div className="mt-0.5 grid grid-cols-2 gap-1.5">
+            {[0, 1, 2, 3].map((i) => (
+              <input key={i} list="box-move-names" value={mon.moves?.[i] || ''} placeholder={`Move ${i + 1}`}
+                onChange={(e) => onUpdate({ moves: [0, 1, 2, 3].map((j) => (j === i ? e.target.value : mon.moves?.[j] || '')) })}
+                className="mt-0.5 px-2 py-1 rounded border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-sm" />
+            ))}
+          </div>
+          <datalist id="box-move-names">
+            {moveNames.map((n) => <option key={n} value={n} />)}
+          </datalist>
+        </div>
+        <div>
+          <label className="block text-xs text-stone-500 dark:text-stone-400">Ability</label>
+          <input list="box-ability-names" value={mon.ability || ''} placeholder="—"
+            onChange={(e) => onUpdate({ ability: e.target.value })}
+            className="mt-0.5 px-2 py-1 rounded border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-sm w-48" />
+          <datalist id="box-ability-names">
+            {(sp?.abilities || []).map((a) => <option key={a.name} value={a.name} />)}
+          </datalist>
+        </div>
+
         <div className="flex items-center justify-between pt-2 border-t border-[#ece2c4] dark:border-stone-800/60">
           <div>
             <label className="block text-xs text-stone-500 dark:text-stone-400">Move to box</label>
@@ -394,11 +479,3 @@ function Toggle({ label, on, onClick }) {
   );
 }
 
-function downloadText(text, filename) {
-  const blob = new Blob([text], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}

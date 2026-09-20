@@ -270,8 +270,42 @@ fn flash_toast(app: tauri::AppHandle, text: String, ok: bool) {
     });
 }
 
+/// Save a text export (Box JSON, Showdown team, …) into the user's Downloads
+/// folder. The WebView ignores <a download> clicks, so exports go through here.
+/// Returns the full path written. An existing file gets a " (n)" suffix.
+#[tauri::command]
+fn save_text(filename: String, text: String) -> Result<String, String> {
+    let name: String = filename
+        .chars()
+        .map(|c| if "\\/:*?\"<>|".contains(c) { '_' } else { c })
+        .collect();
+    let home = std::env::var("USERPROFILE").map_err(|e| e.to_string())?;
+    let dir = std::path::Path::new(&home).join("Downloads");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let p = std::path::Path::new(&name);
+    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("export").to_string();
+    let ext = p.extension().and_then(|s| s.to_str()).map(|e| format!(".{e}")).unwrap_or_default();
+    let mut path = dir.join(&name);
+    let mut n = 1;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}){ext}"));
+        n += 1;
+    }
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 fn main() {
     tauri::Builder::default()
+        // Must be first: a second launch focuses the running window and exits,
+        // so a stale instance can never hold the global capture hotkey.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(win) = app.get_webview_window("main") {
+                let _ = win.show();
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(|app, _shortcut, event| {
@@ -303,7 +337,7 @@ fn main() {
                 .build()?;
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![list_windows, capture_and_ocr, flash_toast])
+        .invoke_handler(tauri::generate_handler![list_windows, capture_and_ocr, flash_toast, save_text])
         .run(tauri::generate_context!())
         .expect("error while running the PokeKit desktop shell");
 }

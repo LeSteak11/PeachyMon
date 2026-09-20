@@ -10,6 +10,7 @@ fn main() {
                 "list_windows",
                 "capture_and_ocr",
                 "flash_toast",
+                "save_text",
             ]),
         ),
     )

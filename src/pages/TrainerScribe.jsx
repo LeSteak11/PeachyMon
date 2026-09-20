@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Sun, Moon, Crop, X, Download, Play, Square, Save, Trash2, RefreshCw } from 'lucide-react';
 import PokemonSprite from '../components/PokemonSprite.jsx';
-import { isDesktop, listWindows, captureAndOcr } from '../lib/desktop.js';
+import { isDesktop, listWindows, captureAndOcr, downloadText } from '../lib/desktop.js';
 import {
   buildObservation, mergeObservation, loadScribe, saveScribe, scribeToJSON,
   parseOpponentBar, parseRoute,
@@ -438,11 +438,3 @@ function upsertBar(prev, bar) {
   const next = [...prev]; next[i] = { ...next[i], level: bar.level ?? next[i].level, gender: bar.gender ?? next[i].gender }; return next;
 }
 
-function downloadText(text, filename) {
-  const blob = new Blob([text], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}

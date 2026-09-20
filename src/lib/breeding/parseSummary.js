@@ -69,6 +69,72 @@ function valuesAfterLabel(line, re) {
   return idx === -1 ? line.words : line.words.slice(idx + 1);
 }
 
+// Stat names as they appear on PokéMMO's IV tab, matched against the row's
+// label text lowercased with spaces removed. Windows OCR mangles the small
+// "IV:" suffix differently per row ("HPIV:", "'v:", "Atk1V:", "DeflV:"), so we
+// never rely on it — only the stat name. Order matters: Sp. stats first.
+const IV_ROW_LABELS = [
+  ['spa', /[s5]p\W?a/],
+  ['spd', /[s5]p\W?d/],
+  ['spe', /[s5]pe/],
+  ['hp', /hp/],
+  ['atk', /att|atk/],
+  ['def', /def/],
+];
+
+// Returns { hp:{value,green}, … } when at least 4 of the 6 rows were read
+// (missing rows become 0 for the user to fix), else null.
+// Values are matched by position, not by OCR line: the right-hand header
+// ("Patrat ♀ Lv. 5") sits level with the HP row, so OCR line-grouping can pull
+// the HP value into the header's line. For each stat label we take the
+// leftmost unused number right of where the label starts, at the same height (leftmost = the value
+// box, not the "Lv. 5" further right).
+function parseIvRows(lines) {
+  const isNum = (w) => /^\d{1,2}$/.test(String(w.text).trim());
+  const all = lines.flatMap((l) => l.words);
+  const heights = all.map((w) => w.h || 0).filter(Boolean).sort((a, b) => a - b);
+  const tol = Math.max(6, (heights.length ? heights[Math.floor(heights.length / 2)] : 12) * 0.8);
+  const nums = all.filter(isNum);
+  // The value boxes are the leftmost numbers; real stat labels start left of
+  // them. The header name (Hoppip, Rattata, Spearow…) sits to their right and
+  // must never be read as a label.
+  const valueCol = nums.length ? Math.min(...nums.map((w) => w.x)) : Infinity;
+  const used = new Set();
+  const found = {};
+  for (const line of lines) {
+    const k = line.words.findIndex(isNum);
+    const labelWords = k === -1 ? line.words : line.words.slice(0, k);
+    if (!labelWords.length) continue;
+    const label = labelWords.map((w) => String(w.text)).join('').toLowerCase();
+    if (/total/.test(label)) continue;
+    const hit = IV_ROW_LABELS.find(([, re]) => re.test(label));
+    if (!hit || found[hit[0]]) continue;
+    const left = Math.min(...labelWords.map((w) => w.x));
+    if (left >= valueCol) continue;
+    const yc = labelWords.reduce((sum, w) => sum + w.y + (w.h || 0) / 2, 0) / labelWords.length;
+    const val = nums
+      .filter((w) => !used.has(w) && w.x > left && Math.abs(w.y + (w.h || 0) / 2 - yc) <= tol)
+      .sort((a, b) => a.x - b.x)[0];
+    if (!val) continue;
+    used.add(val);
+    found[hit[0]] = { value: parseInt(val.text, 10), green: !!val.green, x: val.x };
+  }
+  if (Object.keys(found).length < 4) return null;
+
+  // OCR sometimes drops a label entirely (the HP label, right under the title
+  // bar, often vanishes while its value is read fine). The six values always
+  // sit in one column in fixed order, so take the column's numbers top→bottom:
+  // exactly six → assign HP…Spe by position, overriding label matches.
+  const colX = found[Object.keys(found)[0]].x;
+  const col = nums
+    .filter((w) => Math.abs(w.x - colX) <= tol * 2)
+    .sort((a, b) => a.y - b.y);
+  if (col.length === 6) {
+    return Object.fromEntries(IV_KEYS.map((k, i) => [k, { value: parseInt(col[i].text, 10), green: !!col[i].green }]));
+  }
+  return Object.fromEntries(IV_KEYS.map((k) => [k, found[k] || { value: 0, green: false }]));
+}
+
 export function parseSummary(payload) {
   const words = Array.isArray(payload?.words) ? payload.words : [];
   const text = payload?.text || words.map((w) => w.text).join(' ');
@@ -80,6 +146,13 @@ export function parseSummary(payload) {
     gender: null,
     speciesName: null,
     confidence: { ivs: false, nature: false, species: false },
+    page: null, // 'ivs' when this was PokéMMO's per-row IV tab
+    dexNum: null, // from the info tab's "Pokédex: 501" row
+    level: null,    // header "Lv. 9" — on every summary tab
+    item: null,     // "Item Held: X" — '' when None, null when not seen
+    nickname: null, // info tab "Name:" row
+    moves: null,    // moves tab: raw move-name texts (resolve with resolveName)
+    ability: null,  // moves tab "Ability:" row, raw text
   };
 
   // ── IVs ── prefer the line anchored by the "IVs" label, then map the six
@@ -90,6 +163,15 @@ export function parseSummary(payload) {
   if (ivLine) {
     const toks = numberTokens(valuesAfterLabel(ivLine, labelRe.ivs));
     if (toks.length >= 6) ivTokens = toks.slice(0, 6);
+  }
+  if (!ivTokens) {
+    // PokéMMO's IV tab: one row per stat — "HP IV: 15", "Sp. Atk IV: 31", …
+    // Identify each row by its stat name and take the first number after it.
+    const rowIvs = parseIvRows(lines);
+    if (rowIvs) {
+      ivTokens = IV_KEYS.map((k) => rowIvs[k]);
+      result.page = 'ivs';
+    }
   }
   if (!ivTokens) {
     // Fallback: a 6-number slash group where every value ≤ 31 and not all zero
@@ -124,6 +206,71 @@ export function parseSummary(payload) {
     }
   }
 
+  // ── Pokédex number ── PokéMMO's info tab has a "Pokédex: 501" row; it's the
+  // most reliable species signal (dex number == our species id).
+  for (const line of lines) {
+    const i = line.words.findIndex((w) => /^pok.{0,2}dex:?$/i.test(String(w.text).trim()));
+    if (i === -1) continue;
+    const num = line.words.slice(i + 1).map((w) => String(w.text).match(/^\d{1,3}$/)).find(Boolean);
+    if (num) { result.dexNum = parseInt(num[0], 10); break; }
+  }
+
+  // ── Level ── header "Lv. 9" (OCR gives "Lv." "9" or "Lv.9").
+  for (const line of lines) {
+    const m = line.words.map((w) => String(w.text)).join(' ').match(/\blv\.?\s*(\d{1,3})\b/i);
+    if (m && +m[1] >= 1 && +m[1] <= 100) { result.level = +m[1]; break; }
+  }
+
+  // ── Held item ── "Item Held: None" in the bottom-right, on every tab.
+  for (const line of lines) {
+    const m = line.words.map((w) => String(w.text)).join(' ').match(/held\s*:?\s*(.+)$/i);
+    if (m) { result.item = /^none\b/i.test(m[1].trim()) ? '' : m[1].trim(); break; }
+  }
+
+  // ── Nickname ── info tab "Name: Oshawott" (equals the species if unnamed).
+  const nameLine = findLabelLine(lines, /^name:?$/i);
+  if (nameLine) {
+    const nick = valuesAfterLabel(nameLine, /^name:?$/i).map((w) => String(w.text)).join(' ').trim();
+    if (nick) result.nickname = nick;
+  }
+
+  // ── Moves tab ── four "Move Name / PP: 35/35" blocks + "Ability: X".
+  // A PP line is matched by SHAPE, not the letters "PP": OCR drops the prefix
+  // ("35/35") and misreads the slash ("30130", "20 1 20"). Each move name is
+  // the left-panel line directly above a PP line.
+  const lineText = (l) => l.words.map((w) => String(w.text)).join(' ').trim();
+  const isPpLine = (l) => {
+    const t = lineText(l);
+    return /\bpp\b/i.test(t)
+      || /^\d{1,3}\s*[/1lI|]\s*\d{1,3}$/.test(t)   // 35/35, 25 / 25
+      || /^\d{4,6}$/.test(t.replace(/\s+/g, ''));  // 30130, 20120
+  };
+  const ppLines = lines.filter(isPpLine);
+  if (ppLines.length >= 2 && result.page !== 'ivs') {
+    result.page = 'moves';
+    const lvL = findLabelLine(lines, labelRe.level);
+    const rightEdge = lvL ? Math.min(...lvL.words.map((w) => w.x)) : Infinity;
+    const abilityLine = findLabelLine(lines, /^ability:?$/i);
+    const moves = [];
+    for (const line of lines) {
+      if (abilityLine && line.yc >= abilityLine.yc) break;
+      if (isPpLine(line)) continue;
+      const ws = line.words.filter((w) => w.x < rightEdge);
+      if (!ws.length) continue;
+      const h = Math.max(...ws.map((w) => w.h || 10));
+      const pp = ppLines.find((l) => l.yc > line.yc && l.yc - line.yc <= h * 3);
+      if (!pp) continue;
+      const t = ws.map((w) => String(w.text)).join(' ').trim();
+      if (t.replace(/[^a-z]/gi, '').length >= 3) moves.push(t);
+    }
+    result.moves = moves.slice(0, 4);
+    if (abilityLine) {
+      const ab = valuesAfterLabel(abilityLine, /^ability:?$/i).filter((w) => w.x < rightEdge)
+        .map((w) => String(w.text)).join(' ').trim();
+      if (ab) result.ability = ab;
+    }
+  }
+
   // ── Gender ── PokéMMO draws a ♂/♀ glyph by the name. OCR rarely reads it
   // reliably, so this is best-effort; the user confirms.
   if (/[♂]/.test(text)) result.gender = 'M';
@@ -133,6 +280,19 @@ export function parseSummary(payload) {
   // number, dropping gender glyphs.
   const lvLine = findLabelLine(lines, labelRe.level);
   if (lvLine) {
+    // PokéMMO's header reads "Oshawott ♂ Lv. 8" — the name sits BEFORE the
+    // level. Walk left from "Lv." over name-like words (max 2, e.g. Mr. Mime).
+    const idx = lvLine.words.findIndex((w) => labelRe.level.test(String(w.text).replace(/[:.]+$/, '')));
+    const before = [];
+    for (let i = idx - 1; i >= 0 && before.length < 2; i--) {
+      const t = String(lvLine.words[i].text).replace(/[♂♀]/g, '');
+      if (!t) continue;
+      if (!/^[A-Za-z.'’\-]+$/.test(t) || /:$/.test(t)) break;
+      before.unshift(t);
+    }
+    if (before.length) { result.speciesName = before.join(' '); result.confidence.species = true; }
+  }
+  if (lvLine && !result.speciesName) {
     const after = valuesAfterLabel(lvLine, labelRe.level)
       .map((w) => String(w.text))
       .filter((t) => !/^\d+$/.test(t) && !/^[♂♀]$/.test(t));
@@ -161,4 +321,37 @@ export function resolveSpecies(name, pokemon) {
   if (hit) return hit.id;
   hit = pokemon.find((p) => norm(p.name).includes(n) || n.includes(norm(p.name)));
   return hit ? hit.id : null;
+}
+
+// Match OCR text to a canonical name (moves, abilities, items): exact after
+// normalizing, else the closest name within a small edit distance. Returns the
+// canonical name or null.
+export function resolveName(text, names) {
+  const norm = (t) => String(t).toLowerCase().replace(/[^a-z0-9]/g, '');
+  const n = norm(text);
+  if (n.length < 3) return null;
+  let best = null, bestD = Infinity, tie = false;
+  for (const name of names) {
+    const m = norm(name);
+    if (m === n) return name;
+    if (Math.abs(m.length - n.length) > 2) continue;
+    const d = editDistance(n, m);
+    if (d < bestD) { bestD = d; best = name; tie = false; }
+    else if (d === bestD && m !== norm(best)) tie = true;
+  }
+  // A tie (e.g. "Water Spon" → Water Sport / Water Spout) is a guess: refuse.
+  return !tie && bestD <= Math.max(1, Math.floor(n.length / 4)) ? best : null;
+}
+
+function editDistance(a, b) {
+  const row = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = row[0]; row[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = row[j];
+      row[j] = Math.min(row[j] + 1, row[j - 1] + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return row[b.length];
 }

@@ -1,3 +1,4 @@
+import { showToast } from './toast.js';
 // Thin bridge to the Tauri desktop shell. Uses the injected `window.__TAURI__`
 // global (enabled by withGlobalTauri in tauri.conf.json) rather than importing
 // an @tauri-apps/* package — so the website build pulls in ZERO desktop deps
@@ -86,4 +87,26 @@ export function beep(ok) {
   } catch {
     /* ignore */
   }
+}
+
+// Export a text file. On the web this is a normal <a download>; the desktop
+// WebView ignores those, so there we write to Downloads via the save_text
+// command and also copy the text to the clipboard (handy for pasting a team).
+export async function downloadText(text, filename, type = 'text/plain') {
+  if (isDesktop()) {
+    let copied = false;
+    try { await navigator.clipboard.writeText(text); copied = true; } catch { /* ignore */ }
+    try {
+      const path = await invoke('save_text', { filename, text });
+      showToast(`Saved to ${path}${copied ? ' · also copied to clipboard' : ''}`);
+    } catch (e) {
+      showToast(copied ? 'Copied to clipboard (file save failed)' : `Export failed: ${e}`);
+    }
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([text], { type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }

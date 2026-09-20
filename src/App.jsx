@@ -288,6 +288,7 @@ export default function App() {
                   data={data}
                   store={boxStore}
                   setStore={setBoxStore}
+                  onCaught={(id) => setMonState(id, 'caught')}
                   theme={theme} onTheme={setTheme}
                 />
               }

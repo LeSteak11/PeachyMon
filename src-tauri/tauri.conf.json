@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "PokeKit",
+  "productName": "PeachyMon",
   "version": "0.1.0",
   "identifier": "com.pokekit.app",
   "build": {
@@ -14,8 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "url": "https://antproj.github.io/PokeKit/",
-        "title": "PokeKit by TyrAntitar",
+        "title": "PeachyMon",
         "width": 1280,
         "height": 860,
         "minWidth": 980,
