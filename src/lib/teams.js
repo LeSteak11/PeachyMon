@@ -17,6 +17,7 @@ export function blankSet() {
   return {
     id: rid('s_'),
     monId: null,
+    boxMonId: null,
     level: 100,
     nature: 'Hardy',
     ability: '',
@@ -48,6 +49,8 @@ export function normalizeSet(s) {
   return {
     id: typeof s.id === 'string' && s.id ? s.id : base.id,
     monId: Number.isFinite(Number(s.monId)) && s.monId != null ? Number(s.monId) : null,
+    // Which Box mon this set came from, so the Box can mark it as on the team.
+    boxMonId: typeof s.boxMonId === 'string' && s.boxMonId ? s.boxMonId : null,
     level: clampLevel(s.level ?? 100),
     nature: typeof s.nature === 'string' && s.nature ? s.nature : 'Hardy',
     ability: typeof s.ability === 'string' ? s.ability : '',
@@ -99,6 +102,41 @@ function mapTeam(s, id, fn) { return { ...s, teams: s.teams.map((t) => (t.id ===
 export function addMember(s, teamId, set) { return mapTeam(s, teamId, (t) => (t.members.length >= MAX_MEMBERS ? t : { ...t, members: [...t.members, normalizeSet(set) || blankSet()] })); }
 export function updateMember(s, teamId, setId, patch) { return mapTeam(s, teamId, (t) => ({ ...t, members: t.members.map((m) => (m.id === setId ? { ...m, ...patch } : m)) })); }
 export function removeMember(s, teamId, setId) { return mapTeam(s, teamId, (t) => ({ ...t, members: t.members.filter((m) => m.id !== setId) })); }
+// Push a Box mon's current details into every team set built from it, across
+// ALL teams — so editing a mon in the Box (level, moves, evolution…) doesn't
+// leave stale copies sitting in your lineups. EVs are left alone; they're a
+// team-side choice the Box knows nothing about.
+//
+// Sets saved before sets tracked their source mon have no boxMonId; those are
+// adopted when the species matches and nothing else claims them.
+export function syncSetsFromBoxMon(s, mon) {
+  if (!mon?.id) return s;
+  let changed = false;
+  const teams = s.teams.map((t) => {
+    const claimed = new Set(t.members.map((m) => m.boxMonId).filter(Boolean));
+    const members = t.members.map((set) => {
+      const exact = set.boxMonId === mon.id;
+      const adopt = !set.boxMonId && !claimed.has(mon.id) && set.monId === mon.species;
+      if (!exact && !adopt) return set;
+      changed = true;
+      return {
+        ...set,
+        boxMonId: mon.id,
+        monId: mon.species ?? set.monId,
+        level: mon.level || set.level,
+        nature: mon.nature || set.nature,
+        ability: mon.ability || set.ability,
+        item: mon.item ?? set.item,
+        gender: ['M', 'F'].includes(mon.gender) ? mon.gender : set.gender,
+        ivs: { ...set.ivs, ...(mon.ivs || {}) },
+        moves: [0, 1, 2, 3].map((i) => mon.moves?.[i] || set.moves?.[i] || ''),
+      };
+    });
+    return changed ? { ...t, members } : t;
+  });
+  return changed ? { ...s, teams } : s;
+}
+
 export function setTeamMembers(s, teamId, members) { return mapTeam(s, teamId, (t) => ({ ...t, members: members.map(normalizeSet).filter(Boolean).slice(0, MAX_MEMBERS) })); }
 
 /* ── Showdown / PokéPaste ── */

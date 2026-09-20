@@ -7,6 +7,7 @@ import { stateOf, exportTrackerState, parseImport } from '../lib/tracker.js';
 
 export default function Tracker({
   data,
+  catchLog, onLogCatch,
   trackerState, setMonState, setManyMonStates, mergeTrackerState,
   view, setView,
   theme, onTheme,
@@ -83,8 +84,8 @@ export default function Tracker({
       <div className="sticky top-0 z-20 bg-[#f6efdc]/95 dark:bg-stone-950/95 backdrop-blur border-b border-[#e6dabf] dark:border-stone-800">
         <div className="max-w-7xl mx-auto px-4 py-2.5 flex items-center gap-3 flex-wrap">
           <div className="inline-flex rounded-md border border-[#d6c8a3] dark:border-stone-700 overflow-hidden">
+            <ViewBtn active={view.view === 'mark'} onClick={() => setMode('mark')}>Progress</ViewBtn>
             <ViewBtn active={view.view === 'plan'} onClick={() => setMode('plan')}>Plan</ViewBtn>
-            <ViewBtn active={view.view === 'mark'} onClick={() => setMode('mark')}>Mark</ViewBtn>
           </div>
           <ProgressSummary trackerState={trackerState} total={data.pokemon.length} />
           <div className="ml-auto flex items-center gap-1.5">
@@ -149,6 +150,8 @@ export default function Tracker({
         />
       ) : (
         <TrackerMark
+          catchLog={catchLog}
+          onLogCatch={onLogCatch}
           data={data}
           trackerState={trackerState}
           setMonState={setMonState}

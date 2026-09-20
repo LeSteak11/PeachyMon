@@ -6,6 +6,8 @@ import DexSearchInput from '../components/DexSearchInput.jsx';
 import TypePills from '../components/TypePills.jsx';
 import { PokemonCardBody } from '../components/PokemonCard.jsx';
 import { regionKey, statTotal } from '../lib/format.js';
+import TrackerProgress from '../components/TrackerProgress.jsx';
+import PokemonSprite from '../components/PokemonSprite.jsx';
 import { stateOf, cycleClick } from '../lib/tracker.js';
 import {
   BABY_FILTERS, EVOLUTION_CATEGORIES,
@@ -55,6 +57,7 @@ export default function TrackerMark({
   trackerState, setMonState, setManyMonStates,
   view, updateView,
   openPanel,
+  catchLog, onLogCatch,
 }) {
   const {
     markSearch, markRegion, markTypes, markStates, markSort,
@@ -252,6 +255,12 @@ export default function TrackerMark({
     lastClickedId.current = id;
   }, [setMonState, trackerState]);
 
+  const [showFilters, setShowFilters] = useState(false);
+  // How many filter groups are narrowing the grid (shown on the Filters button).
+  const activeFilterCount =
+    (markRegion !== 'All' ? 1 : 0) + (markTypes.length ? 1 : 0) + (markStates.length ? 1 : 0)
+    + (markBaby !== 'any' ? 1 : 0) + (markRarities.length ? 1 : 0)
+    + (markEvolutions.length ? 1 : 0) + (markTiers.length ? 1 : 0);
   const clearSelection = useCallback(() => setSelected(new Set()), []);
   const applyBulk = useCallback((state) => {
     setManyMonStates([...selected], state);
@@ -260,7 +269,9 @@ export default function TrackerMark({
 
   return (
     <main className="max-w-7xl mx-auto px-4 py-4 space-y-4">
-      {/* Filters */}
+      <TrackerProgress data={data} trackerState={trackerState} catchLog={catchLog} onLogCatch={onLogCatch} />
+
+      {/* Search, sort, and the filter drawer */}
       <section className="rounded-md border border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900 p-3 space-y-2">
         <div className="flex items-center gap-3 flex-wrap">
           <DexSearchInput
@@ -281,10 +292,30 @@ export default function TrackerMark({
               {SORTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
             </select>
           </div>
+          <button
+            type="button"
+            onClick={() => setShowFilters((v) => !v)}
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-md border text-xs ${
+              activeFilterCount
+                ? 'border-blue-300 text-blue-700 dark:border-blue-900 dark:text-blue-300'
+                : 'border-[#d6c8a3] dark:border-stone-700 text-stone-600 dark:text-stone-300'}`}
+          >
+            Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
+          </button>
+          {activeFilterCount > 0 && (
+            <button
+              type="button"
+              onClick={() => updateView({ markRegion: 'All', markTypes: [], markStates: [], markBaby: 'any', markRarities: [], markEvolutions: [], markTiers: [] })}
+              className="text-xs text-stone-500 hover:text-stone-900 dark:hover:text-stone-200 underline underline-offset-2"
+            >
+              Clear
+            </button>
+          )}
           <span className="text-xs text-stone-500 dark:text-stone-400 tabular-nums">
             {filtered.length} mon{filtered.length === 1 ? '' : 's'}
           </span>
         </div>
+        {showFilters && (<>
 
         <RegionPills value={markRegion} onChange={setRegion} />
 
@@ -378,6 +409,7 @@ export default function TrackerMark({
             onClear={() => updateView({ markTiers: [] })}
           />
         )}
+        </>)}
       </section>
 
       {/* Bulk action bar */}
@@ -389,12 +421,11 @@ export default function TrackerMark({
       {filtered.length === 0 ? (
         <div className="py-16 text-center text-stone-500 dark:text-stone-400">No Pokémon match.</div>
       ) : (
-        <div className="grid gap-3 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-8">
+        <div className="grid gap-1.5" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(58px, 1fr))' }}>
           {filtered.map((p) => (
-            <TrackerCard
+            <TrackerCell
               key={p.id}
               pokemon={p}
-              region={markRegion}
               state={stateOf(trackerState, p.id)}
               isSelected={selected.has(p.id)}
               onClick={handleClick}
@@ -407,6 +438,52 @@ export default function TrackerMark({
     </main>
   );
 }
+
+/* ─────────────── Dense dex cell ─────────────── */
+// Sprite-only tile: caught in colour, uncaught dim, priority ringed amber.
+// Click cycles caught, shift-click selects, right-click/long-press opens the
+// catch panel — the same gestures the old card had.
+const TrackerCell = memo(function TrackerCell({ pokemon: p, state, isSelected, onClick, openPanel, tierMeta }) {
+  const longPress = useLongPress(useCallback(() => openPanel(p.id), [openPanel, p.id]));
+  const onCellClick = useCallback((e) => onClick(p.id, e), [onClick, p.id]);
+  const onContextMenu = useCallback((e) => { e.preventDefault(); openPanel(p.id); }, [openPanel, p.id]);
+
+  const caught = state === 'caught';
+  const skipped = state === 'skipped';
+  const priority = state === 'priority';
+
+  return (
+    <button
+      type="button"
+      onClick={onCellClick}
+      onContextMenu={onContextMenu}
+      {...longPress}
+      aria-pressed={isSelected}
+      title={`#${p.id} ${p.name}${tierMeta ? ` · ${tierMeta.label}` : ''} — ${state}`}
+      className={`group relative aspect-square rounded-md border flex items-center justify-center transition-colors
+                  ${isSelected ? 'ring-2 ring-blue-500 ' : ''}
+                  ${caught
+                    ? 'border-emerald-400/70 bg-emerald-500/10'
+                    : priority
+                      ? 'border-amber-400 bg-amber-400/10'
+                      : skipped
+                        ? 'border-[#e6dabf] dark:border-stone-800 bg-transparent'
+                        : 'border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900 hover:border-blue-400'}`}
+    >
+      <PokemonSprite
+        pokemon={p}
+        variant="still"
+        loading="lazy"
+        className={`w-9 h-9 object-contain transition ${caught ? '' : skipped ? 'opacity-20 grayscale' : 'opacity-45 grayscale group-hover:opacity-80'}`}
+      />
+      {caught && <span className="absolute bottom-0.5 right-0.5 text-[9px] text-emerald-600 dark:text-emerald-400">✓</span>}
+      {priority && <span className="absolute top-0.5 left-0.5 text-[9px] text-amber-600 dark:text-amber-400">★</span>}
+      <span className="pointer-events-none absolute -bottom-0.5 left-0 right-0 truncate px-0.5 text-[8px] leading-tight text-stone-500 opacity-0 group-hover:opacity-100 bg-[#fdf8e9]/90 dark:bg-stone-900/90">
+        {p.name}
+      </span>
+    </button>
+  );
+});
 
 /* ─────────────── Bulk action bar ─────────────── */
 

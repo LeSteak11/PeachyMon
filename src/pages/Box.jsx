@@ -1,6 +1,6 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Sun, Moon, Plus, Trash2, Pencil, Check, X, Download, Upload, Search, Filter, ClipboardCopy, ArrowUpRight,
+  Sun, Moon, Plus, Trash2, Pencil, Check, X, Download, Upload, Search, Filter, ClipboardCopy, ArrowUpRight, Heart, Users, UserMinus,
 } from 'lucide-react';
 import PokemonSprite from '../components/PokemonSprite.jsx';
 import PokemonPicker from '../components/PokemonPicker.jsx';
@@ -14,18 +14,41 @@ import {
   blankBoxMon, perfectCount, boxById, allMons,
   addBox, renameBox, deleteBox, setActiveBox,
   addMon, addMons, updateMon, removeMon, moveMon,
-  storeToJSON, storeFromJSON, appendImportedBoxes, boxToAiText,
+  storeToJSON, storeFromJSON, appendImportedBoxes, boxToAiText, monsToAiText, storeOfMons, updateMons, removeMons,
 } from '../lib/box.js';
 import { showToast } from '../lib/toast.js';
+import {
+  teamById, addTeam as teamsAddTeam, setActiveTeam, addMember as teamAddMember,
+  removeMember as teamRemoveMember, blankSet, MAX_MEMBERS, syncSetsFromBoxMon,
+} from '../lib/teams.js';
+import { gradeMon } from '../lib/ivGrade.js';
 import { downloadText } from '../lib/desktop.js';
 
-const EMPTY_FILTERS = { search: '', types: [], gender: 'any', shiny: 'any', alpha: 'any', minPerfect: 0 };
+const EMPTY_FILTERS = {
+  search: '', types: [], gender: 'any', shiny: 'any', alpha: 'any', favorite: 'any',
+  minPerfect: 0, nature: '', minGrade: 0, team: 'any',
+  ivMin: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 },
+};
 
-export default function BoxPage({ data, store, setStore, theme, onTheme, onCaught }) {
+// Box sort orders. 'box' keeps the stored order (team mons pinned first).
+const BOX_SORTS = [
+  { value: 'box', label: 'Box order' },
+  { value: 'grade', label: 'IV grade ↓' },
+  { value: 'perfect', label: '31s ↓' },
+  { value: 'level', label: 'Level ↓' },
+  { value: 'name', label: 'Name A→Z' },
+  { value: 'dex', label: 'Dex #' },
+  { value: 'newest', label: 'Newest first' },
+];
+
+export default function BoxPage({ data, store, setStore, theme, onTheme, onCaught, teamsStore, setTeamsStore, onLogCatch }) {
   const [viewBoxId, setViewBoxId] = useState(() => store.activeBoxId); // boxId | 'all'
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [showFilters, setShowFilters] = useState(false);
+  const [sortBy, setSortBy] = useState('box');
   const [editId, setEditId] = useState(null);
+  const [selected, setSelected] = useState(() => new Set()); // mon ids
+  const lastClickedRef = useRef(null); // anchor for shift-click ranges
   const fileRef = useRef(null);
 
   const byId = useMemo(() => new Map(data.pokemon.map((p) => [p.id, p])), [data.pokemon]);
@@ -57,15 +80,25 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
       if (filters.gender !== 'any' && m.gender !== filters.gender) return false;
       if (filters.shiny !== 'any' && (filters.shiny === 'yes') !== !!m.shiny) return false;
       if (filters.alpha !== 'any' && (filters.alpha === 'yes') !== !!m.alpha) return false;
+      if (filters.favorite !== 'any' && (filters.favorite === 'yes') !== !!m.favorite) return false;
       if (filters.minPerfect > 0 && perfectCount(m) < filters.minPerfect) return false;
+      if (filters.nature && m.nature !== filters.nature) return false;
+      if (IV_KEYS.some((k) => (m.ivs?.[k] ?? 0) < (filters.ivMin?.[k] ?? 0))) return false;
+      if (filters.minGrade > 0) {
+        const g = gradeMon(m, sp);
+        if (!g || g.score < filters.minGrade) return false;
+      }
       return true;
     });
   }, [viewMons, filters, byId]);
 
+
   const activeFilterCount =
     (filters.search ? 1 : 0) + (filters.types.length ? 1 : 0) +
     (filters.gender !== 'any' ? 1 : 0) + (filters.shiny !== 'any' ? 1 : 0) +
-    (filters.alpha !== 'any' ? 1 : 0) + (filters.minPerfect > 0 ? 1 : 0);
+    (filters.alpha !== 'any' ? 1 : 0) + (filters.favorite !== 'any' ? 1 : 0) + (filters.minPerfect > 0 ? 1 : 0)
+    + (filters.nature ? 1 : 0) + (filters.minGrade > 0 ? 1 : 0)
+    + (IV_KEYS.some((k) => (filters.ivMin?.[k] ?? 0) > 0) ? 1 : 0);
 
   /* ── store handlers ── */
   const onAddBox = () => setStore((s) => { const ns = addBox(s); setViewBoxId(ns.activeBoxId); return ns; });
@@ -82,12 +115,150 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
   const onCaptureImport = (mons) => {
     setStore((s) => addMons(s, s.activeBoxId, mons));
     for (const m of mons) if (m.species != null) onCaught?.(m.species);
+    // Counts toward catch badges forever — deleting or transferring later
+    // never takes it back.
+    onLogCatch?.(mons);
+  };
+
+  /* ── selection ── single click toggles, shift-click takes a range,
+     double click opens the editor (the two clicks cancel each other out) ── */
+  const onTileClick = (mon, ev) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (ev.shiftKey && lastClickedRef.current) {
+        const ids = ordered.map((m) => m.id);
+        const a = ids.indexOf(lastClickedRef.current);
+        const b = ids.indexOf(mon.id);
+        if (a !== -1 && b !== -1) {
+          for (const id of ids.slice(Math.min(a, b), Math.max(a, b) + 1)) next.add(id);
+          return next;
+        }
+      }
+      if (next.has(mon.id)) next.delete(mon.id); else next.add(mon.id);
+      return next;
+    });
+    lastClickedRef.current = mon.id;
+  };
+  // Catch-up pass when the Box opens: teams built before this sync existed (or
+  // edited while the Box page was closed) get their linked sets refreshed once.
+  // Mount-only, so it never fights edits made in Team Builder afterwards.
+  useEffect(() => {
+    if (!setTeamsStore) return;
+    const mons = allMons(store);
+    setTeamsStore((ts) => mons.reduce((acc, m) => syncSetsFromBoxMon(acc, m), ts));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Editing a mon in the Box updates the same mon everywhere it's used on a
+  // team, so lineups never show stale levels or moves.
+  const applyMonPatch = (id, patch) => {
+    setStore((st) => updateMon(st, id, patch));
+    if (!setTeamsStore) return;
+    const current = allMons(store).find((m) => m.id === id);
+    if (!current) return;
+    const merged = { ...current, ...patch };
+    setTeamsStore((ts) => syncSetsFromBoxMon(ts, merged));
+  };
+
+  const clearSelection = () => setSelected(new Set());
+  const selectedMons = useMemo(() => allMons(store).filter((m) => selected.has(m.id)), [store, selected]);
+  const allShownSelected = filtered.length > 0 && filtered.every((m) => selected.has(m.id));
+  const allSelectedFav = selectedMons.length > 0 && selectedMons.every((m) => m.favorite);
+
+  const selCopyAi = async () => {
+    try {
+      await navigator.clipboard.writeText(monsToAiText(selectedMons, nameOf, 'My PokéMMO Pokémon', gradeOf));
+      showToast(`${selectedMons.length} mon${selectedMons.length === 1 ? '' : 's'} copied — paste into your AI chat.`);
+    } catch { showToast('Could not copy to the clipboard.'); }
+  };
+  const selExport = () => downloadText(storeToJSON(storeOfMons(store, selectedMons), nameOf), 'pokemmo-box-selection.json');
+  const selFavorite = () => setStore((s2) => updateMons(s2, [...selected], { favorite: !allSelectedFav }));
+  const selDelete = () => {
+    const n = selectedMons.length;
+    if (!window.confirm(`Delete ${n} mon${n === 1 ? '' : 's'} from your Box? This can't be undone.`)) return;
+    setStore((s2) => removeMons(s2, [...selected]));
+    clearSelection();
+    showToast(`Deleted ${n} mon${n === 1 ? '' : 's'}.`);
   };
 
   const nameOf = (id) => byId.get(id)?.name || null;
+  const gradeOf = (m) => gradeMon(m, m.species != null ? byId.get(m.species) : null);
+
+  /* ── active team ── a set remembers the Box mon it came from; older sets
+     fall back to matching by species. ── */
+  const activeTeam = teamsStore ? (teamById(teamsStore, teamsStore.activeTeamId) || teamsStore.teams[0]) : null;
+  const teamSlotOf = (mon) => {
+    if (!activeTeam) return 0;
+    const exact = activeTeam.members.findIndex((mb) => mb.boxMonId === mon.id);
+    if (exact !== -1) return exact + 1;
+    const loose = activeTeam.members.findIndex((mb) => !mb.boxMonId && mb.monId === mon.species);
+    return loose === -1 ? 0 : loose + 1;
+  };
+  const teamSetIdOf = (mon) => {
+    if (!activeTeam) return null;
+    const hit = activeTeam.members.find((mb) => mb.boxMonId === mon.id)
+      || activeTeam.members.find((mb) => !mb.boxMonId && mb.monId === mon.species);
+    return hit ? hit.id : null;
+  };
+  const addToTeam = (mons) => {
+    if (!activeTeam) return;
+    const free = MAX_MEMBERS - activeTeam.members.length;
+    const queue = mons.filter((m) => m.species != null && !teamSetIdOf(m)).slice(0, Math.max(0, free));
+    if (!queue.length) {
+      showToast(free <= 0 ? `“${activeTeam.name}” is full (${MAX_MEMBERS} max).` : 'Already on the team.');
+      return;
+    }
+    setTeamsStore((ts) => queue.reduce((acc, m) => teamAddMember(acc, activeTeam.id, {
+      ...blankSet(), monId: m.species, boxMonId: m.id, ivs: { ...m.ivs },
+      nature: m.nature || 'Hardy', level: m.level || 100, item: m.item || '',
+      ability: m.ability || '', moves: [0, 1, 2, 3].map((i) => m.moves?.[i] || ''),
+      gender: ['M', 'F'].includes(m.gender) ? m.gender : '',
+    }), ts));
+    showToast(`Added ${queue.length} to “${activeTeam.name}”.`);
+  };
+  const removeFromTeam = (mons) => {
+    if (!activeTeam) return;
+    const ids = mons.map(teamSetIdOf).filter(Boolean);
+    if (!ids.length) { showToast('Not on the active team.'); return; }
+    setTeamsStore((ts) => ids.reduce((acc, id) => teamRemoveMember(acc, activeTeam.id, id), ts));
+    showToast(`Removed ${ids.length} from “${activeTeam.name}”.`);
+  };
+  const onNewTeam = () => {
+    const name = window.prompt('Name the new team:', `Team ${(teamsStore?.teams.length || 0) + 1}`);
+    if (name === null) return;
+    setTeamsStore((ts) => teamsAddTeam(ts, name.trim() || undefined));
+  };
+
+  // Active-team mons sort to the front, in team order.
+  const ordered = useMemo(() => {
+    const list = [...filtered];
+    const nameOfMon = (m) => byId.get(m.species)?.name || '';
+    if (sortBy === 'grade') {
+      list.sort((a, b) => (gradeOf(b)?.score ?? -1) - (gradeOf(a)?.score ?? -1));
+    } else if (sortBy === 'perfect') {
+      list.sort((a, b) => perfectCount(b) - perfectCount(a));
+    } else if (sortBy === 'level') {
+      list.sort((a, b) => (b.level ?? 0) - (a.level ?? 0));
+    } else if (sortBy === 'name') {
+      list.sort((a, b) => nameOfMon(a).localeCompare(nameOfMon(b)));
+    } else if (sortBy === 'dex') {
+      list.sort((a, b) => (a.species ?? 9999) - (b.species ?? 9999));
+    } else if (sortBy === 'newest') {
+      list.sort((a, b) => String(b.addedAt || '').localeCompare(String(a.addedAt || '')));
+    } else {
+      // Box order — active-team mons pinned to the front, in team slot order.
+      return list
+        .map((m, i) => ({ m, i, slot: teamSlotOf(m) }))
+        .sort((a, b) => (a.slot ? 1 : 0) !== (b.slot ? 1 : 0)
+          ? (b.slot ? 1 : 0) - (a.slot ? 1 : 0)
+          : a.slot && b.slot ? a.slot - b.slot : a.i - b.i)
+        .map((x) => x.m);
+    }
+    return list;
+  }, [filtered, activeTeam, sortBy, byId]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const doExport = () => downloadText(storeToJSON(store, nameOf), 'pokemmo-box.json');
   const doCopyAi = async () => {
-    try { await navigator.clipboard.writeText(boxToAiText(store, nameOf)); showToast('Box copied — paste it into your AI chat.'); }
+    try { await navigator.clipboard.writeText(boxToAiText(store, nameOf, gradeOf)); showToast('Box copied — paste it into your AI chat.'); }
     catch { showToast('Could not copy to the clipboard.'); }
   };
   const doImportFile = (file) => {
@@ -131,7 +302,24 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
         </div>
       </header>
 
-      <CapturePanel data={data} onImport={onCaptureImport} onUpdate={(id, patch) => setStore((s) => updateMon(s, id, patch))} target={editMon} />
+      {/* Active team — gold tiles below, and the front of the grid */}
+      {teamsStore && activeTeam && (
+        <div className="mb-3 flex items-center gap-2 flex-wrap rounded-md border border-amber-300 dark:border-amber-900/70 bg-amber-50/60 dark:bg-amber-950/20 px-2 py-1.5">
+          <span className="text-[11px] font-semibold uppercase tracking-wider text-amber-800 dark:text-amber-300">Active team</span>
+          <select value={activeTeam.id} onChange={(e) => setTeamsStore((ts) => setActiveTeam(ts, e.target.value))}
+            className="px-2 py-1 rounded border border-amber-300 dark:border-amber-900 bg-[#fdf8e9] dark:bg-stone-900 text-xs text-stone-800 dark:text-stone-200">
+            {teamsStore.teams.map((t) => (
+              <option key={t.id} value={t.id}>{t.name} ({t.members.length}/{MAX_MEMBERS})</option>
+            ))}
+          </select>
+          <button type="button" onClick={onNewTeam} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs"><Plus size={12} /> New team</button>
+          <span className="text-[11px] text-amber-800/80 dark:text-amber-300/80">
+            {activeTeam.members.length}/{MAX_MEMBERS} · gold tiles are on this team
+          </span>
+        </div>
+      )}
+
+      <CapturePanel data={data} onImport={onCaptureImport} onUpdate={applyMonPatch} target={editMon} />
 
       {/* Box tabs */}
       <div className="mt-3 flex items-center gap-1 flex-wrap border-b border-[#e6dabf] dark:border-stone-800 pb-2">
@@ -168,20 +356,61 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
           options={[['any', 'Any'], ['M', '♂'], ['F', '♀']]} />
         <Toggle label="★ Shiny" on={filters.shiny === 'yes'} onClick={() => setFilters((f) => ({ ...f, shiny: f.shiny === 'yes' ? 'any' : 'yes' }))} />
         <Toggle label="α Alpha" on={filters.alpha === 'yes'} onClick={() => setFilters((f) => ({ ...f, alpha: f.alpha === 'yes' ? 'any' : 'yes' }))} />
+        <Toggle label="♥ Favorites" on={filters.favorite === 'yes'} onClick={() => setFilters((f) => ({ ...f, favorite: f.favorite === 'yes' ? 'any' : 'yes' }))} />
+        <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} title="Sort the box"
+          className="px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-xs text-stone-700 dark:text-stone-300">
+          {BOX_SORTS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
         <select value={filters.minPerfect} onChange={(e) => setFilters((f) => ({ ...f, minPerfect: Number(e.target.value) }))}
           className="px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-xs text-stone-700 dark:text-stone-300">
           {[0, 1, 2, 3, 4, 5, 6].map((n) => <option key={n} value={n}>{n === 0 ? 'Any IVs' : `≥ ${n}×31`}</option>)}
         </select>
         <button type="button" onClick={() => setShowFilters((v) => !v)}
-          className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-md border text-xs ${filters.types.length ? 'border-blue-300 text-blue-700 dark:border-blue-900 dark:text-blue-300' : 'border-[#d6c8a3] dark:border-stone-700 text-stone-600 dark:text-stone-300'}`}>
-          <Filter size={13} /> Types{filters.types.length ? ` (${filters.types.length})` : ''}
+          className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-md border text-xs ${activeFilterCount ? 'border-blue-300 text-blue-700 dark:border-blue-900 dark:text-blue-300' : 'border-[#d6c8a3] dark:border-stone-700 text-stone-600 dark:text-stone-300'}`}>
+          <Filter size={13} /> More{activeFilterCount > 0 ? ` (${activeFilterCount})` : ''}
         </button>
         {activeFilterCount > 0 && (
           <button type="button" onClick={() => setFilters(EMPTY_FILTERS)} className="text-xs text-stone-500 hover:text-stone-800 dark:hover:text-stone-200">Clear</button>
         )}
       </div>
       {showFilters && (
-        <div className="mt-2 flex flex-wrap gap-1">
+        <div className="mt-2 space-y-2 rounded-md border border-[#e6dabf] dark:border-stone-800 p-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <label className="text-xs text-stone-500 dark:text-stone-400">Nature</label>
+            <select value={filters.nature} onChange={(e) => setFilters((f) => ({ ...f, nature: e.target.value }))}
+              className="px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-xs text-stone-700 dark:text-stone-300">
+              <option value="">Any</option>
+              {NATURE_NAMES.map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <label className="text-xs text-stone-500 dark:text-stone-400 ml-2">Min grade</label>
+            <select value={filters.minGrade} onChange={(e) => setFilters((f) => ({ ...f, minGrade: Number(e.target.value) }))}
+              className="px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-xs text-stone-700 dark:text-stone-300" title="IV grade — how good its IVs are for that species">
+              <option value={0}>Any</option>
+              <option value={90}>S (90+)</option>
+              <option value={80}>A (80+)</option>
+              <option value={70}>B (70+)</option>
+              <option value={55}>C (55+)</option>
+            </select>
+          </div>
+          <div className="flex items-end gap-2 flex-wrap">
+            <span className="text-xs text-stone-500 dark:text-stone-400 mb-1">Min IVs</span>
+            {IV_KEYS.map((k) => (
+              <label key={k} className="flex flex-col items-center gap-0.5">
+                <span className="text-[10px] uppercase text-stone-500 dark:text-stone-400">{IV_LABELS[k]}</span>
+                <input type="number" min={0} max={31} value={filters.ivMin?.[k] ?? 0}
+                  onChange={(e) => {
+                    const v = Math.min(31, Math.max(0, parseInt(e.target.value, 10) || 0));
+                    setFilters((f) => ({ ...f, ivMin: { ...f.ivMin, [k]: v } }));
+                  }}
+                  className="w-12 px-1 py-1 rounded border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-xs text-center" />
+              </label>
+            ))}
+            {IV_KEYS.some((k) => (filters.ivMin?.[k] ?? 0) > 0) && (
+              <button type="button" onClick={() => setFilters((f) => ({ ...f, ivMin: { hp: 0, atk: 0, def: 0, spa: 0, spd: 0, spe: 0 } }))}
+                className="text-xs text-stone-500 hover:text-stone-900 dark:hover:text-stone-200 underline underline-offset-2 mb-1">Reset IVs</button>
+            )}
+          </div>
+          <div className="flex flex-wrap gap-1">
           {allTypes.map((t) => {
             const on = filters.types.includes(t);
             return (
@@ -192,6 +421,37 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
               </button>
             );
           })}
+          </div>
+        </div>
+      )}
+
+      {/* Selection actions — only while something is selected */}
+      {selected.size > 0 && (
+        <div className="mt-2 flex items-center gap-1.5 flex-wrap rounded-md border border-blue-300 dark:border-blue-900 bg-blue-50/70 dark:bg-blue-950/40 px-2 py-1.5">
+          <span className="text-xs font-medium text-blue-900 dark:text-blue-200">{selected.size} selected</span>
+          <button type="button" onClick={selCopyAi} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs"><ClipboardCopy size={13} /> Copy for AI</button>
+          <button type="button" onClick={selExport} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs"><Download size={13} /> Export</button>
+          <button type="button" onClick={selFavorite} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs">
+            <Heart size={13} className={allSelectedFav ? 'fill-current text-rose-500' : ''} /> {allSelectedFav ? 'Unfavorite' : 'Favorite'}
+          </button>
+          {activeTeam && (
+            <>
+              <button type="button" onClick={() => addToTeam(selectedMons)} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs"><Users size={13} /> Add to team</button>
+              <button type="button" onClick={() => removeFromTeam(selectedMons)} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs"><UserMinus size={13} /> Remove from team</button>
+            </>
+          )}
+          {selected.size === 1 && (
+            <button type="button" onClick={() => setEditId([...selected][0])} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800 text-xs"><Pencil size={13} /> Edit</button>
+          )}
+          <button type="button" onClick={selDelete} className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-red-300 dark:border-red-900 text-red-700 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-950/40 text-xs">
+            <Trash2 size={13} /> Delete
+          </button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button type="button" onClick={() => setSelected(allShownSelected ? new Set() : new Set(ordered.map((m) => m.id)))} className="text-xs text-blue-800 dark:text-blue-300 hover:underline">
+              {allShownSelected ? 'Deselect all' : 'Select all shown'}
+            </button>
+            <button type="button" onClick={clearSelection} title="Clear selection" className="p-1 rounded text-stone-500 hover:text-stone-900 dark:hover:text-stone-100"><X size={13} /></button>
+          </div>
         </div>
       )}
 
@@ -204,10 +464,15 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
         </div>
       ) : (
         <div className="mt-3 grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-8 gap-2">
-          {filtered.map((m) => (
+          {ordered.map((m) => (
             <MonTile key={m.id} mon={m} sp={m.species != null ? byId.get(m.species) : null}
               showBox={viewingAll ? boxById(store, m.boxId)?.name : null}
-              onClick={() => setEditId(m.id)} />
+              selected={selected.has(m.id)}
+              teamSlot={teamSlotOf(m)}
+              grade={gradeOf(m)}
+              onClick={(ev) => onTileClick(m, ev)}
+              onDoubleClick={() => setEditId(m.id)}
+              onEdit={() => setEditId(m.id)} />
           ))}
         </div>
       )}
@@ -226,10 +491,15 @@ export default function BoxPage({ data, store, setStore, theme, onTheme, onCaugh
           data={data}
           boxes={store.boxes}
           onClose={() => setEditId(null)}
-          onUpdate={(patch) => setStore((s) => updateMon(s, editMon.id, patch))}
+          onUpdate={(patch) => applyMonPatch(editMon.id, patch)}
           onMove={(toBox) => setStore((s) => moveMon(s, editMon.id, toBox))}
           onDelete={() => { setStore((s) => removeMon(s, editMon.id)); setEditId(null); }}
           onCaught={onCaught}
+          grade={gradeOf(editMon)}
+          teamSlot={teamSlotOf(editMon)}
+          teamName={activeTeam?.name}
+          onTeamAdd={() => addToTeam([editMon])}
+          onTeamRemove={() => removeFromTeam([editMon])}
         />
       )}
     </main>
@@ -285,25 +555,62 @@ function BoxTabEditable({ box, active, onClick, onRename, onDelete, canDelete })
 
 /* ── grid tile ── */
 
-function MonTile({ mon, sp, showBox, onClick }) {
+function MonTile({ mon, sp, showBox, selected, teamSlot, grade, onClick, onDoubleClick, onEdit }) {
   const perfect = perfectCount(mon);
   const g = mon.gender === 'M' ? '♂' : mon.gender === 'F' ? '♀' : '';
   return (
-    <button type="button" onClick={onClick}
-      className="relative rounded-lg border border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900 hover:border-blue-400 dark:hover:border-blue-700 hover:shadow-sm p-1.5 flex flex-col items-center transition-colors">
-      <div className="absolute top-1 left-1 flex gap-0.5">
+    <button type="button" onClick={onClick} onDoubleClick={onDoubleClick}
+      title="Click to select · double-click to open"
+      className={`group relative select-none rounded-lg border hover:shadow-sm p-1.5 flex flex-col items-center transition-colors ${
+        selected
+          // Selected: a warm gold wash. Light enough that every sprite still
+          // reads clearly on top of it, in both themes.
+          ? 'border-amber-500 ring-2 ring-amber-400 bg-gradient-to-b from-amber-100 via-amber-200/80 to-amber-300/70 dark:from-amber-500/25 dark:via-amber-600/20 dark:to-amber-700/25 shadow-inner'
+          : teamSlot
+            ? 'border-amber-400 dark:border-amber-500/80 bg-amber-50/60 dark:bg-amber-950/25'
+            : 'border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900 hover:border-blue-400 dark:hover:border-blue-700'}`}>
+      {teamSlot > 0 && (
+        <span title={`Slot ${teamSlot} on your active team`}
+          className="absolute -top-1 -left-1 w-4 h-4 rounded-full bg-amber-400 text-[9px] font-bold text-amber-950 flex items-center justify-center shadow">
+          {teamSlot}
+        </span>
+      )}
+      {onEdit && (
+        <span role="button" tabIndex={-1} title="Edit this mon"
+          onClick={(e) => { e.stopPropagation(); onEdit(); }}
+          className="absolute top-0.5 right-0.5 p-1 rounded opacity-0 group-hover:opacity-100 focus:opacity-100 text-stone-500 hover:text-stone-900 dark:hover:text-stone-100 hover:bg-[#ece2c4] dark:hover:bg-stone-800">
+          <Pencil size={11} />
+        </span>
+      )}
+      <div className="absolute top-1 left-1 flex gap-0.5 items-center">
+        {selected && <Check size={11} className="text-blue-600 dark:text-blue-400" />}
+        {mon.favorite && <Heart size={10} className="fill-current text-rose-500" />}
         {mon.shiny && <span title="Shiny" className="text-[10px] text-yellow-500">★</span>}
         {mon.alpha && <span title="Alpha" className="text-[10px] font-bold text-red-500">α</span>}
       </div>
       <span className={`absolute top-1 right-1 text-[10px] ${mon.gender === 'M' ? 'text-blue-500' : mon.gender === 'F' ? 'text-pink-500' : 'text-stone-400'}`}>{g}</span>
       <div className="w-12 h-12 flex items-center justify-center">
-        {sp ? <PokemonSprite pokemon={sp} variant="animated" loading="lazy" className="w-11 h-11 object-contain" />
+        {sp ? <PokemonSprite pokemon={sp} variant="animated" loading="lazy"
+                className={`w-11 h-11 object-contain ${selected ? 'drop-shadow-[0_1px_2px_rgba(0,0,0,0.45)]' : ''}`} />
             : <span className="text-stone-300 dark:text-stone-700 text-2xl">?</span>}
       </div>
       <div className="mt-0.5 w-full text-center">
-        <div className="text-[10px] truncate text-stone-700 dark:text-stone-300" title={mon.nickname || undefined}>{mon.nickname || (sp ? sp.name : 'Unknown')}</div>
-        {mon.level != null && <div className="text-[9px] text-stone-500 dark:text-stone-400">Lv. {mon.level}</div>}
-        <div className="text-[9px] text-stone-500 dark:text-stone-400">{perfect > 0 ? `${perfect}×31` : '—'}</div>
+        <div className={`text-[10px] truncate ${selected ? 'text-amber-950 dark:text-amber-100 font-medium' : 'text-stone-700 dark:text-stone-300'}`} title={mon.nickname || undefined}>{mon.nickname || (sp ? sp.name : 'Unknown')}</div>
+        {mon.level != null && <div className={`text-[9px] ${selected ? 'text-amber-900 dark:text-amber-200/90' : 'text-stone-500 dark:text-stone-400'}`}>Lv. {mon.level}</div>}
+        <div className={`text-[9px] flex items-center justify-center gap-1 ${selected ? 'text-amber-900 dark:text-amber-200/90' : 'text-stone-500 dark:text-stone-400'}`}>
+          <span>{perfect > 0 ? `${perfect}×31` : '—'}</span>
+          {grade && (
+            <span title={grade.reason}
+              className={`px-1 rounded font-semibold ${
+                grade.letter === 'S' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                : grade.letter === 'A' ? 'bg-lime-500/15 text-lime-700 dark:text-lime-400'
+                : grade.letter === 'B' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                : grade.letter === 'C' ? 'bg-orange-500/15 text-orange-700 dark:text-orange-400'
+                : 'bg-stone-500/15 text-stone-600 dark:text-stone-400'}`}>
+              {grade.letter} {grade.score}
+            </span>
+          )}
+        </div>
         {showBox && <div className="text-[8px] text-stone-400 truncate">{showBox}</div>}
       </div>
     </button>
@@ -312,7 +619,7 @@ function MonTile({ mon, sp, showBox, onClick }) {
 
 /* ── mon edit modal ── */
 
-function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete, onCaught }) {
+function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete, onCaught, grade, teamSlot, teamName, onTeamAdd, onTeamRemove }) {
   const breederPokemon = useMemo(() => data.pokemon, [data.pokemon]);
   const sp = mon.species != null ? data.pokemon.find((p) => p.id === mon.species) : null;
   const cat = sp ? (sp.id === 132 ? 'ditto' : genderRatioCategory(sp)) : null;
@@ -330,7 +637,38 @@ function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete, o
         <div className="flex items-center gap-2">
           {sp && <PokemonSprite pokemon={sp} variant="animated" className="w-12 h-12 object-contain" />}
           {sp && <span className="font-mono text-[11px] text-stone-500">{dexNum(sp.id)}</span>}
+          {teamName && (
+            <button type="button" onClick={teamSlot ? onTeamRemove : onTeamAdd}
+              title={teamSlot ? `Remove from “${teamName}”` : `Add to “${teamName}”`}
+              className={`ml-auto inline-flex items-center gap-1 px-2 py-1 rounded-md border text-xs ${
+                teamSlot
+                  ? 'border-amber-400 text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30'
+                  : 'border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 hover:bg-[#ece2c4] dark:hover:bg-stone-800'}`}>
+              {teamSlot ? <><UserMinus size={12} /> On team (slot {teamSlot})</> : <><Users size={12} /> Add to {teamName}</>}
+            </button>
+          )}
         </div>
+
+        {/* IV grade — how good these IVs are for THIS species, not raw totals */}
+        {grade && (
+          <div className="rounded-md border border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900/60 px-2.5 py-2">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">IV grade</span>
+              <span className="text-lg font-bold text-stone-900 dark:text-stone-100">{grade.score}</span>
+              <span className="text-xs text-stone-500">/100</span>
+              <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${
+                grade.letter === 'S' ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400'
+                : grade.letter === 'A' ? 'bg-lime-500/15 text-lime-700 dark:text-lime-400'
+                : grade.letter === 'B' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-400'
+                : grade.letter === 'C' ? 'bg-orange-500/15 text-orange-700 dark:text-orange-400'
+                : 'bg-stone-500/15 text-stone-600 dark:text-stone-400'}`}>{grade.letter}</span>
+            </div>
+            <div className="mt-1.5 h-1.5 rounded bg-[#ece2c4] dark:bg-stone-800 overflow-hidden">
+              <div className="h-full bg-blue-500" style={{ width: `${grade.score}%` }} />
+            </div>
+            <p className="mt-1.5 text-[11px] leading-snug text-stone-600 dark:text-stone-400">{grade.reason}</p>
+          </div>
+        )}
 
         <div>
           <label className="text-xs text-stone-500 dark:text-stone-400">Species</label>
@@ -356,7 +694,8 @@ function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete, o
           <label className="text-xs text-stone-500 dark:text-stone-400">IVs</label>
           <div className="grid grid-cols-6 gap-1 mt-1">
             {IV_KEYS.map((k) => (
-              <label key={k} className="flex flex-col items-center gap-0.5">
+              <label key={k} className={`flex flex-col items-center gap-0.5 ${grade && grade.keyStats.includes(k) ? 'font-semibold' : grade && grade.unused === k ? 'opacity-50' : ''}`}
+                title={grade && grade.keyStats.includes(k) ? 'Key stat for this species' : grade && grade.unused === k ? 'This species does not use this stat' : undefined}>
                 <span className="text-[9px] uppercase text-stone-500 dark:text-stone-400">{IV_LABELS[k]}</span>
                 <input type="number" min="0" max="31" value={mon.ivs[k]}
                   onChange={(e) => { let n = Math.round(Number(e.target.value)); if (!Number.isFinite(n)) n = 0; onUpdate({ ivs: { ...mon.ivs, [k]: Math.min(31, Math.max(0, n)) } }); }}
@@ -391,6 +730,9 @@ function MonEditModal({ mon, data, boxes, onClose, onUpdate, onMove, onDelete, o
           </label>
           <label className="inline-flex items-center gap-1 text-sm text-stone-700 dark:text-stone-300 mt-4">
             <input type="checkbox" checked={mon.alpha} onChange={(e) => onUpdate({ alpha: e.target.checked })} className="accent-red-500" /> Alpha
+          </label>
+          <label className="inline-flex items-center gap-1 text-sm text-stone-700 dark:text-stone-300 mt-4">
+            <input type="checkbox" checked={!!mon.favorite} onChange={(e) => onUpdate({ favorite: e.target.checked })} className="accent-rose-500" /> ♥ Favorite
           </label>
         </div>
 

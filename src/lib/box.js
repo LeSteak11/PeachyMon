@@ -30,6 +30,7 @@ export function blankBoxMon() {
     moves: ['', '', '', ''],
     shiny: false,
     alpha: false,
+    favorite: false,
     source: 'manual', // 'manual' | 'capture' | 'import'
     addedAt: null,
   };
@@ -75,6 +76,7 @@ export function normalizeMon(m) {
     moves: [0, 1, 2, 3].map((i) => (Array.isArray(m.moves) && typeof m.moves[i] === 'string' ? m.moves[i] : '')),
     shiny: !!m.shiny,
     alpha: !!m.alpha,
+    favorite: !!m.favorite,
     source: ['manual', 'capture', 'import'].includes(m.source) ? m.source : 'manual',
     addedAt: typeof m.addedAt === 'string' ? m.addedAt : null,
   };
@@ -177,6 +179,14 @@ export function moveMon(store, monId, toBoxId) {
   if (!moving) return store;
   return { ...store, boxes: stripped.map((b) => (b.id === toBoxId ? { ...b, mons: [...b.mons, moving] } : b)) };
 }
+export function updateMons(store, monIds, patch) {
+  const ids = new Set(monIds);
+  return { ...store, boxes: store.boxes.map((b) => ({ ...b, mons: b.mons.map((m) => (ids.has(m.id) ? { ...m, ...patch } : m)) })) };
+}
+export function removeMons(store, monIds) {
+  const ids = new Set(monIds);
+  return { ...store, boxes: store.boxes.map((b) => ({ ...b, mons: b.mons.filter((m) => !ids.has(m.id)) })) };
+}
 export function addMons(store, boxId, mons) {
   return { ...store, boxes: store.boxes.map((b) => (b.id === boxId ? { ...b, mons: [...b.mons, ...mons] } : b)) };
 }
@@ -219,30 +229,43 @@ export function storeToJSON(store, nameOf) {
   return JSON.stringify(out, null, 2);
 }
 
-// Plain-text Box summary for pasting into an AI chat — one line per mon.
-export function boxToAiText(store, nameOf) {
+// One readable line per mon — the shape an AI chat reads best.
+export function monsToAiText(mons, nameOf, heading = 'My PokéMMO Pokémon', gradeOf = null) {
   const g = { M: '♂', F: '♀', N: 'genderless', D: '' };
-  const lines = ['My PokéMMO Box (IVs are HP/Atk/Def/SpA/SpD/Spe, 0-31):'];
-  for (const b of normalizeStore(store).boxes) {
-    if (!b.mons.length) continue;
-    lines.push('', `${b.name}:`);
-    for (const m of b.mons) {
-      const name = nameOf(m.species) || 'Unknown';
-      const bits = [m.nickname ? `${m.nickname} (${name})` : name];
-      if (g[m.gender]) bits[0] += ` ${g[m.gender]}`;
-      if (m.level) bits.push(`Lv. ${m.level}`);
-      if (m.nature) bits.push(`${m.nature} nature`);
-      if (m.ability) bits.push(`ability ${m.ability}`);
-      bits.push(`held item: ${m.item || 'none'}`);
-      bits.push(`IVs ${IV_KEYS.map((k) => m.ivs[k]).join('/')}`);
-      const mv = m.moves.filter(Boolean);
-      if (mv.length) bits.push(`moves: ${mv.join(' / ')}`);
-      if (m.shiny) bits.push('shiny');
-      if (m.alpha) bits.push('alpha');
-      lines.push(`- ${bits.join(', ')}`);
-    }
+  const lines = [`${heading} (IVs are HP/Atk/Def/SpA/SpD/Spe, 0-31):`];
+  for (const m of mons.map(normalizeMon).filter(Boolean)) {
+    const name = nameOf(m.species) || 'Unknown';
+    const bits = [m.nickname ? `${m.nickname} (${name})` : name];
+    if (g[m.gender]) bits[0] += ` ${g[m.gender]}`;
+    if (m.level) bits.push(`Lv. ${m.level}`);
+    if (m.nature) bits.push(`${m.nature} nature`);
+    if (m.ability) bits.push(`ability ${m.ability}`);
+    bits.push(`held item: ${m.item || 'none'}`);
+    bits.push(`IVs ${IV_KEYS.map((k) => m.ivs[k]).join('/')}`);
+    const mv = m.moves.filter(Boolean);
+    if (mv.length) bits.push(`moves: ${mv.join(' / ')}`);
+    if (m.shiny) bits.push('shiny');
+    if (m.alpha) bits.push('alpha');
+    const grade = gradeOf?.(m);
+    if (grade) bits.push(`IV grade ${grade.score}/100 (${grade.letter}), graded on ${grade.keyStats.map((k) => k.toUpperCase()).join('+')}`);
+    lines.push(`- ${bits.join(', ')}`);
   }
   return lines.join('\n');
+}
+
+// A store holding just these mons — for exporting a selection as Box JSON.
+export function storeOfMons(store, mons, boxName = 'Selection') {
+  const box = { id: rid('box_'), name: boxName, mons: mons.map(normalizeMon).filter(Boolean) };
+  return { version: BOX_VERSION, boxes: [box], activeBoxId: box.id };
+}
+
+// Plain-text summary of every box, for pasting into an AI chat.
+export function boxToAiText(store, nameOf, gradeOf = null) {
+  const parts = [];
+  for (const b of normalizeStore(store).boxes) {
+    if (b.mons.length) parts.push(monsToAiText(b.mons, nameOf, `My PokéMMO Box — ${b.name}`, gradeOf));
+  }
+  return parts.join('\n\n') || 'My PokéMMO Box is empty.';
 }
 
 // Parse imported text → { store, error }. Accepts a v3 store or a legacy flat

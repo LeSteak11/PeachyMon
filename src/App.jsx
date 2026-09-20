@@ -5,6 +5,7 @@ import PokemonModal from './components/PokemonModal.jsx';
 import Pokedex from './pages/Pokedex.jsx';
 import { loadStore as loadBoxStore, saveStore as saveBoxStore, addMon as boxAddMon, blankBoxMon } from './lib/box.js';
 import { loadStore as loadTeamsStore, saveStore as saveTeamsStore, addMember as teamAddMember, blankSet, teamById, MAX_MEMBERS } from './lib/teams.js';
+import { loadLog as loadCatchLog, saveLog as saveCatchLog, logCatches } from './lib/catchLog.js';
 import Toaster from './components/Toaster.jsx';
 import { showToast } from './lib/toast.js';
 
@@ -60,7 +61,7 @@ const INITIAL_POKEDEX = {
   stats: { hp: null, attack: null, defense: null, sp_attack: null, sp_defense: null, speed: null, bst: null },
 };
 const INITIAL_LOCATIONS = { search: '', region: 'Kanto', sort: 'game', methods: [], rarities: [] };
-const INITIAL_TRACKER_VIEW = { view: 'plan', planRegion: 'All', planMethods: [], planRarities: [], hideSingles: true,
+const INITIAL_TRACKER_VIEW = { view: 'mark', planRegion: 'All', planMethods: [], planRarities: [], hideSingles: true,
   // Plan mon-attribute filters — shared predicates with the Mark view
   // (src/lib/monFilters.js). planTypes (≤2), planBaby (any|only|exclude),
   // planEvolutions (category keys), planTiers (hunt-tier numbers).
@@ -107,6 +108,11 @@ export default function App() {
   // The Box — shared across the Box page and the breeding planner.
   const [boxStore, setBoxStore]               = useState(loadBoxStore);
   useEffect(() => { saveBoxStore(boxStore); }, [boxStore]);
+
+  // Catch log — every catch ever, independent of what's still in the Box.
+  const [catchLog, setCatchLog] = useState(loadCatchLog);
+  useEffect(() => { saveCatchLog(catchLog); }, [catchLog]);
+  const logCatch = useCallback((mons) => setCatchLog((l) => logCatches(l, mons)), []);
 
   // Teams — Team Builder store.
   const [teamsStore, setTeamsStore]           = useState(loadTeamsStore);
@@ -270,6 +276,8 @@ export default function App() {
               element={
                 <Tracker
                   data={data}
+                  catchLog={catchLog}
+                  onLogCatch={logCatch}
                   trackerState={trackerState}
                   setMonState={setMonState}
                   setManyMonStates={setManyMonStates}
@@ -289,6 +297,9 @@ export default function App() {
                   store={boxStore}
                   setStore={setBoxStore}
                   onCaught={(id) => setMonState(id, 'caught')}
+                  teamsStore={teamsStore}
+                  setTeamsStore={setTeamsStore}
+                  onLogCatch={logCatch}
                   theme={theme} onTheme={setTheme}
                 />
               }

@@ -1,6 +1,7 @@
-import { memo, useCallback, useMemo, useRef } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { ChevronRight, Star, Check, X } from 'lucide-react';
 import TypeBadge from '../components/TypeBadge.jsx';
+import DexSearchInput from '../components/DexSearchInput.jsx';
 import RarityBadge from '../components/RarityBadge.jsx';
 import PokemonSprite from '../components/PokemonSprite.jsx';
 import FilterRow from '../components/FilterRow.jsx';
@@ -221,10 +222,105 @@ export default function TrackerPlan({
     planTypes: [], planBaby: 'any', planEvolutions: [], planTiers: [],
   }), [updateView]);
 
+  const [search, setSearch] = useState('');
+  const [showFilters, setShowFilters] = useState(false);
+  const [sortBy, setSortBy] = useState('score'); // score | count | name
+  const activeFilterCount =
+    (planRegion !== 'All' ? 1 : 0) + (planTypes.length ? 1 : 0) + (planMethods.length ? 1 : 0)
+    + (planRarities.length ? 1 : 0) + (planBaby !== 'any' ? 1 : 0)
+    + (planEvolutions.length ? 1 : 0) + (planTiers.length ? 1 : 0);
+  /* ── "where do I catch X?" ── the search resolves to one species, then the
+     location list narrows to the places it spawns, easiest first. ── */
+  const searchMon = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return null;
+    const asNum = q.replace(/^#/, '');
+    if (/^\d+$/.test(asNum)) return pokemonById.get(Number(asNum)) || null;
+    const all = [...pokemonById.values()];
+    return all.find((p) => p.name.toLowerCase() === q)
+      || all.find((p) => p.name.toLowerCase().startsWith(q))
+      || all.find((p) => p.name.toLowerCase().includes(q))
+      || null;
+  }, [search, pokemonById]);
+
+  // Where that mon actually spawns (ignores the Plan's uncaught-only ranking,
+  // so you can look up a mon you already have).
+  const searchHits = useMemo(() => {
+    if (!searchMon) return [];
+    const out = [];
+    for (const loc of locationPlan) {
+      const me = loc.mons.find((m) => m.pokemon.id === searchMon.id);
+      if (me) out.push({ loc, entries: me.entries });
+    }
+    return out.sort((a, b) => trackerRarityRank(a.entries[0]?.rarity) - trackerRarityRank(b.entries[0]?.rarity));
+  }, [searchMon, locationPlan]);
+
+  // Not catchable? Point at the closest pre-evolution that is.
+  const searchSource = useMemo(() => {
+    if (!searchMon || searchHits.length) return null;
+    let cur = searchMon;
+    const seen = new Set();
+    while (cur?.pre_evolution != null && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      const prev = pokemonById.get(cur.pre_evolution?.id ?? cur.pre_evolution);
+      if (!prev) break;
+      const where = locationPlan.filter((loc) => loc.mons.some((m) => m.pokemon.id === prev.id));
+      if (where.length) return { mon: prev, locations: where.slice(0, 3) };
+      cur = prev;
+    }
+    return null;
+  }, [searchMon, searchHits, locationPlan, pokemonById]);
+
+  const sorted = useMemo(() => {
+    const list = [...ranked];
+    if (sortBy === 'count') list.sort((a, b) => b.eligible.length - a.eligible.length || b.score - a.score);
+    else if (sortBy === 'name') list.sort((a, b) => a.name.localeCompare(b.name));
+    return list;
+  }, [ranked, sortBy]);
+
   return (
     <main className="max-w-7xl mx-auto px-4 py-4 space-y-4">
-      {/* Filter row */}
+      {/* What this page is, plus sort + the filter drawer */}
       <section className="rounded-md border border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900 p-3 space-y-2">
+        <div className="flex items-baseline gap-2 flex-wrap">
+          <h2 className="font-semibold text-stone-900 dark:text-stone-100">Where to catch what you're missing</h2>
+          <span className="text-xs text-stone-500 dark:text-stone-400">
+            Ranked by how much dex progress a trip is worth — common spawns score highest, hordes and lure-only spots lowest. Caught and skipped mons don't count.
+          </span>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <DexSearchInput
+            className="flex-1 min-w-[200px]"
+            value={search}
+            onChange={setSearch}
+            placeholder="Where do I catch… (name or dex #)"
+          />
+          <label className="text-xs text-stone-500 dark:text-stone-400">Sort</label>
+          <select value={sortBy} onChange={(e) => setSortBy(e.target.value)}
+            className="px-2 py-1.5 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 text-sm text-stone-900 dark:text-stone-100">
+            <option value="score">Best value</option>
+            <option value="count">Most new mons</option>
+            <option value="name">A–Z</option>
+          </select>
+          <button type="button" onClick={() => setShowFilters((v) => !v)}
+            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-md border text-xs ${
+              activeFilterCount
+                ? 'border-blue-300 text-blue-700 dark:border-blue-900 dark:text-blue-300'
+                : 'border-[#d6c8a3] dark:border-stone-700 text-stone-600 dark:text-stone-300'}`}>
+            Filters{activeFilterCount ? ` (${activeFilterCount})` : ''}
+          </button>
+          {activeFilterCount > 0 && (
+            <button type="button"
+              onClick={() => updateView({ planRegion: 'All', planTypes: [], planMethods: [], planRarities: [], planBaby: 'any', planEvolutions: [], planTiers: [] })}
+              className="text-xs text-stone-500 hover:text-stone-900 dark:hover:text-stone-200 underline underline-offset-2">
+              Clear
+            </button>
+          )}
+          <span className="ml-auto text-xs text-stone-500 dark:text-stone-400 tabular-nums">
+            {sorted.length} location{sorted.length === 1 ? '' : 's'}
+          </span>
+        </div>
+        {showFilters && (<>
         <RegionPills value={planRegion} onChange={setRegion} />
 
         <TypePills value={planTypes} onChange={setTypes} />
@@ -288,27 +384,80 @@ export default function TrackerPlan({
             />
             Hide single-mon locations
           </label>
-          <button
-            type="button"
-            onClick={resetFilters}
-            className="text-stone-500 dark:text-stone-400 hover:text-stone-900 dark:hover:text-stone-100 underline underline-offset-2"
-          >
-            Reset filters
-          </button>
           <span className="ml-auto text-stone-500 dark:text-stone-400 tabular-nums">
             {ranked.length} location{ranked.length === 1 ? '' : 's'}
           </span>
         </div>
+        </>)}
       </section>
 
-      {/* Location cards */}
-      {ranked.length === 0 ? (
+      {/* Search answer — one mon, every place it spawns, easiest first */}
+      {searchMon && (
+        <section className="rounded-md border border-blue-300 dark:border-blue-900 bg-blue-50/60 dark:bg-blue-950/25 p-3">
+          <div className="flex items-center gap-3">
+            <PokemonSprite pokemon={searchMon} variant="animated" className="w-12 h-12 object-contain shrink-0" />
+            <div className="min-w-0">
+              <div className="font-semibold text-stone-900 dark:text-stone-100">{searchMon.name}</div>
+              <div className="text-xs text-stone-600 dark:text-stone-400">
+                {searchHits.length > 0
+                  ? `Spawns in ${searchHits.length} location${searchHits.length === 1 ? '' : 's'} · easiest: ${searchHits[0].loc.name} (${searchHits[0].entries[0]?.rarity || 'unknown'})`
+                  : searchSource
+                    ? `Not catchable in the wild — catch ${searchSource.mon.name} and evolve it.`
+                    : 'Not catchable in the wild.'}
+              </div>
+            </div>
+            <button type="button" onClick={() => setSearch('')}
+              className="ml-auto text-xs text-stone-500 hover:text-stone-900 dark:hover:text-stone-200 underline underline-offset-2">
+              Clear search
+            </button>
+          </div>
+          {searchHits.length === 0 && searchSource && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {searchSource.locations.map((loc) => (
+                <button key={`${loc.region}::${loc.name}`} type="button" onClick={() => setOpenKey(`${loc.region}::${loc.name}`)}
+                  className="inline-flex items-center gap-1 rounded-md border border-[#d6c8a3] dark:border-stone-700 bg-[#fdf8e9] dark:bg-stone-900 px-2 py-1 text-xs hover:bg-[#ece2c4] dark:hover:bg-stone-800">
+                  <PokemonSprite pokemon={searchSource.mon} variant="still" className="w-4 h-4 object-contain" />
+                  {loc.name} <span className="text-stone-500">({loc.region})</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Search results: every spawn of that mon, easiest first */}
+      {searchMon && searchHits.length > 0 && (
+        <div className="space-y-1.5">
+          {searchHits.map(({ loc, entries }) => (
+            <button key={`${loc.region}::${loc.name}`} type="button" onClick={() => setOpenKey(`${loc.region}::${loc.name}`)}
+              className="w-full flex items-center gap-3 text-left rounded-md border border-[#e6dabf] dark:border-stone-800 bg-[#fdf8e9] dark:bg-stone-900 hover:border-blue-400 dark:hover:border-blue-700 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">{loc.region}</div>
+                <div className="font-semibold text-stone-900 dark:text-stone-100 truncate">{loc.name}</div>
+              </div>
+              <div className="flex flex-wrap gap-x-2 gap-y-0.5 justify-end text-[11px] text-stone-600 dark:text-stone-400 max-w-[60%]">
+                {entries.map((e, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 whitespace-nowrap">
+                    <MethodIcon method={e.method} size={12} />
+                    {e.rarity}
+                    {e.min_level != null && <span className="text-stone-500">Lv {e.min_level}{e.max_level != null && e.max_level !== e.min_level ? `–${e.max_level}` : ''}</span>}
+                  </span>
+                ))}
+              </div>
+              <ChevronRight size={16} className="shrink-0 text-stone-400" />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* Location cards — the normal ranking, hidden while searching */}
+      {searchMon ? null : sorted.length === 0 ? (
         <div className="py-16 text-center text-stone-500 dark:text-stone-400 text-sm">
           No locations have catchable mons under your current filters.
         </div>
       ) : (
         <div className="space-y-2">
-          {ranked.map((loc) => (
+          {sorted.map((loc) => (
             <PlanLocationCard
               key={`${loc.region}::${loc.name}`}
               loc={loc}
@@ -319,7 +468,19 @@ export default function TrackerPlan({
       )}
 
       {openKey && (() => {
-        const loc = ranked.find((l) => `${l.region}::${l.name}` === openKey);
+        // Search results can point at a location the ranking filtered out
+        // (everything there is already caught, say), so fall back to the raw
+        // index and show every mon that lives there.
+        let loc = ranked.find((l) => `${l.region}::${l.name}` === openKey);
+        if (!loc) {
+          const raw = locationPlan.find((l) => `${l.region}::${l.name}` === openKey);
+          if (raw) {
+            loc = {
+              region: raw.region, name: raw.name, methods: raw.methods,
+              eligible: raw.mons, score: 0, priorityScore: 0, priorityCount: 0,
+            };
+          }
+        }
         if (!loc) { setOpenKey(null); return null; }
         return (
           <PlanLocationModal
@@ -368,12 +529,21 @@ const PlanLocationCard = memo(function PlanLocationCard({ loc, onOpen }) {
           <span key={m} className="inline-flex items-center gap-1"><MethodIcon method={m} size={12} />{m}</span>
         ))}
       </div>
-      <div className="shrink-0 flex flex-col items-end ml-2">
-        <div className="text-[10px] text-stone-500 dark:text-stone-400">Score</div>
-        <div className="font-bold text-stone-900 dark:text-stone-100 tabular-nums text-lg leading-none">{loc.score}</div>
-        <div className="text-[10px] text-stone-500 dark:text-stone-400 tabular-nums">
-          {hasPriority && <span className="text-amber-600 dark:text-amber-400">★{loc.priorityCount} · </span>}
-          {loc.eligible.length} mon{loc.eligible.length === 1 ? '' : 's'}
+      <div className="shrink-0 flex items-center gap-2 ml-2">
+        <span
+          title="Pokémon here you haven't caught yet"
+          className="inline-flex items-baseline gap-1 rounded-full bg-blue-500/10 text-blue-800 dark:text-blue-300 px-2 py-0.5 tabular-nums"
+        >
+          <span className="font-bold text-sm leading-none">{loc.eligible.length}</span>
+          <span className="text-[10px]">new</span>
+        </span>
+        <div className="flex flex-col items-end">
+          {hasPriority && (
+            <span className="text-[10px] text-amber-600 dark:text-amber-400 tabular-nums">★{loc.priorityCount} priority</span>
+          )}
+          <span className="text-[10px] text-stone-500 dark:text-stone-400 tabular-nums" title="Trip value — rarer catches are worth less because they take longer">
+            value {loc.score}
+          </span>
         </div>
       </div>
       <ChevronRight size={16} className="shrink-0 text-stone-400 ml-1" />
@@ -398,11 +568,11 @@ function PlanLocationModal({ loc, trackerState, setMonState, openPanel, onClose 
               <div className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">{loc.region}</div>
               <h2 className="text-lg font-bold text-stone-900 dark:text-stone-100 truncate">{loc.name}</h2>
               <div className="mt-0.5 text-xs text-stone-500 dark:text-stone-400">
-                {loc.eligible.length} catchable mon{loc.eligible.length === 1 ? '' : 's'}
+                {loc.eligible.length} mon{loc.eligible.length === 1 ? '' : 's'} you still need
               </div>
             </div>
             <div className="shrink-0 flex flex-col items-end">
-              <div className="text-[10px] text-stone-500 dark:text-stone-400">Score</div>
+              <div className="text-[10px] text-stone-500 dark:text-stone-400" title="Trip value — rarer catches are worth less because they take longer">Trip value</div>
               <div className="font-bold text-stone-900 dark:text-stone-100 tabular-nums text-2xl leading-none">{loc.score}</div>
             </div>
             <button

@@ -38,7 +38,7 @@ export default function TeamBuilder({ data, store, setStore, boxStore, theme, on
   /* handlers */
   const upd = (setId, patch) => setStore((s) => updateMember(s, team.id, setId, patch));
   const addBlank = () => setStore((s) => addMember(s, team.id, blankSet()));
-  const addFromBox = (bm) => { setStore((s) => addMember(s, team.id, { ...blankSet(), monId: bm.species, ivs: { ...bm.ivs }, nature: bm.nature || 'Hardy', level: bm.level || 100, item: bm.item || '', ability: bm.ability || '', moves: [0, 1, 2, 3].map((i) => bm.moves?.[i] || ''), gender: ['M', 'F'].includes(bm.gender) ? bm.gender : '' })); setBoxPick(false); };
+  const addFromBox = (bm) => { setStore((s) => addMember(s, team.id, { ...blankSet(), monId: bm.species, boxMonId: bm.id, ivs: { ...bm.ivs }, nature: bm.nature || 'Hardy', level: bm.level || 100, item: bm.item || '', ability: bm.ability || '', moves: [0, 1, 2, 3].map((i) => bm.moves?.[i] || ''), gender: ['M', 'F'].includes(bm.gender) ? bm.gender : '' })); setBoxPick(false); };
   const exportShowdown = () => downloadText(teamToShowdown(team, (id) => byId.get(id)?.name || 'Unknown'), `${team.name.replace(/\s+/g, '_')}.txt`);
   const exportJSON = () => downloadText(storeToJSON(store), 'pokemmo-teams.json');
   const doImport = () => {
