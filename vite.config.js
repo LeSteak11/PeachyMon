@@ -11,7 +11,7 @@ const isTauri = !!process.env.TAURI_ENV_PLATFORM;
 // The desktop (Tauri) build overrides this to './'.
 export default defineConfig({
   plugins: [react()],
-  base: isTauri ? './' : '/PokeKit/',
+  base: isTauri ? './' : '/PeachyMon/',
   // The vendored damage engine (vendor/pokemmo-calc) is CommonJS — esbuild
   // pre-bundles it in dev (optimizeDeps), and in the production build Rollup's
   // commonjs transform must reach it. Because it's a `file:` dep that resolves

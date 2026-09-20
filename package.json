@@ -1,9 +1,9 @@
 {
-  "name": "pokekit",
+  "name": "peachymon",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "homepage": "https://antproj.github.io/PokeKit/",
+  "homepage": "https://github.com/LeSteak11/PeachyMon",
   "scripts": {
     "_comment_env": "Scripts that need POKEMMO_MAPS_DIR or R2 creds use Node's built-in --env-file-if-exists flag (Node >= 20.6). '.env.local' is loaded if present, otherwise the existing process env wins. Vite's dev/build don't need this because Vite has its own .env loader.",
 
